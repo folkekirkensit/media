@@ -23,9 +23,12 @@ use TYPO3\Media\Exception;
  *
  * @Flow\Entity
  * @ORM\Table(
- *    indexes={
- * 		@ORM\Index(name="originalasset_configurationhash",columns={"originalasset", "configurationhash"})
- *    }
+ *  uniqueConstraints={
+ *      @ORM\UniqueConstraint(name="originalasset_configurationhash",columns={"originalasset", "configurationhash"})
+ *  },
+ *  indexes={
+ *      @ORM\Index(name="originalasset_configurationhash",columns={"originalasset", "configurationhash"})
+ *  }
  * )
  */
 class Thumbnail implements ImageInterface
@@ -48,8 +51,7 @@ class Thumbnail implements ImageInterface
     /**
      * @var \TYPO3\Flow\Resource\Resource
      * @ORM\OneToOne(orphanRemoval = true, cascade={"all"})
-     * @Flow\Validate(type = "NotEmpty")
-     * @ORM\JoinColumn(nullable=false)
+     * @ORM\JoinColumn(nullable=true)
      */
     protected $resource;
 
@@ -66,29 +68,38 @@ class Thumbnail implements ImageInterface
     protected $configurationHash;
 
     /**
+     * @var boolean
+     * @Flow\Transient
+     */
+    protected $async;
+
+    /**
      * Constructs a new Thumbnail
      *
      * @param AssetInterface $originalAsset The original asset this variant is derived from
      * @param ThumbnailConfiguration $configuration
      * @throws \TYPO3\Media\Exception
      */
-    public function __construct(AssetInterface $originalAsset, ThumbnailConfiguration $configuration)
+    public function __construct(AssetInterface $originalAsset, ThumbnailConfiguration $configuration, $async = false)
     {
         if (!$originalAsset instanceof ImageInterface) {
             throw new Exception(sprintf('Support for creating thumbnails of other than Image assets has not been implemented yet (given asset was a %s)', get_class($originalAsset)), 1378132300);
         }
         $this->originalAsset = $originalAsset;
         $this->setConfiguration($configuration);
+        $this->async = $async;
+        $this->emitThumbnailCreated($this);
     }
 
     /**
      * Initializes this thumbnail
      *
      * @param integer $initializationCause
+     * @return void
      */
     public function initializeObject($initializationCause)
     {
-        if ($initializationCause === ObjectManagerInterface::INITIALIZATIONCAUSE_CREATED) {
+        if ($initializationCause === ObjectManagerInterface::INITIALIZATIONCAUSE_CREATED && $this->async === false) {
             $this->refresh();
         }
     }
@@ -115,6 +126,7 @@ class Thumbnail implements ImageInterface
 
     /**
      * @param ThumbnailConfiguration $configuration
+     * @return void
      */
     protected function setConfiguration(ThumbnailConfiguration $configuration)
     {
@@ -156,5 +168,16 @@ class Thumbnail implements ImageInterface
         $this->resource = $processedImageInfo['resource'];
         $this->width = $processedImageInfo['width'];
         $this->height = $processedImageInfo['height'];
+    }
+
+    /**
+     * Signals that a thumbnail was created.
+     *
+     * @Flow\Signal
+     * @param Thumbnail $thumbnail
+     * @return void
+     */
+    protected function emitThumbnailCreated(Thumbnail $thumbnail)
+    {
     }
 }

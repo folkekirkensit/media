@@ -14,13 +14,13 @@ namespace TYPO3\Media\Domain\Service;
 use TYPO3\Flow\Annotations as Flow;
 use TYPO3\Flow\Log\SystemLoggerInterface;
 use TYPO3\Flow\Persistence\PersistenceManagerInterface;
-use TYPO3\Flow\SignalSlot\Dispatcher;
 use TYPO3\Media\Domain\Model\AssetInterface;
 use TYPO3\Media\Domain\Model\ImageInterface;
 use TYPO3\Media\Domain\Model\ThumbnailConfiguration;
 use TYPO3\Media\Domain\Model\Thumbnail;
 use TYPO3\Media\Domain\Repository\ThumbnailRepository;
 use TYPO3\Media\Exception\NoThumbnailAvailableException;
+use TYPO3\Media\Exception\ThumbnailServiceException;
 
 /**
  * An internal thumbnail service.
@@ -45,12 +45,6 @@ class ThumbnailService
 
     /**
      * @Flow\Inject
-     * @var Dispatcher
-     */
-    protected $signalSlotDispatcher;
-
-    /**
-     * @Flow\Inject
      * @var PersistenceManagerInterface
      */
     protected $persistenceManager;
@@ -68,6 +62,17 @@ class ThumbnailService
     protected $resourceManager;
 
     /**
+     * @Flow\InjectConfiguration("thumbnailPresets")
+     * @var boolean
+     */
+    protected $presets;
+
+    /**
+     * @var array
+     */
+    protected $thumbnailCache = [];
+
+    /**
      * Returns a thumbnail of the given asset
      *
      * If the maximum width / height is not specified or exceeds the original asset's dimensions, the width / height of
@@ -75,23 +80,37 @@ class ThumbnailService
      *
      * @param AssetInterface $asset The asset to render a thumbnail for
      * @param ThumbnailConfiguration $configuration
+     * @param boolean $async Create asynchronous thumbnail if it doesn't already exist
      * @return Thumbnail
      * @throws \Exception
      */
-    public function getThumbnail(AssetInterface $asset, ThumbnailConfiguration $configuration)
+    public function getThumbnail(AssetInterface $asset, ThumbnailConfiguration $configuration, $async = false)
     {
-        $thumbnail = $this->thumbnailRepository->findOneByAssetAndThumbnailConfiguration($asset, $configuration);
+        $assetIdentifier = $this->persistenceManager->getIdentifierByObject($asset);
+        $configurationHash = $configuration->getHash();
+        if (!isset($this->thumbnailCache[$assetIdentifier])) {
+            $this->thumbnailCache[$assetIdentifier] = [];
+        }
+        if (isset($this->thumbnailCache[$assetIdentifier][$configurationHash])) {
+            $thumbnail = $this->thumbnailCache[$assetIdentifier][$configurationHash];
+        } else {
+            $thumbnail = $this->thumbnailRepository->findOneByAssetAndThumbnailConfiguration($asset, $configuration);
+            $this->thumbnailCache[$assetIdentifier][$configurationHash] = $thumbnail;
+        }
         if ($thumbnail === null) {
             if (!$asset instanceof ImageInterface) {
                 throw new NoThumbnailAvailableException(sprintf('ThumbnailService could not generate a thumbnail for asset of type "%s" because currently only Image assets are supported.', get_class($asset)), 1381493670);
             }
-            $thumbnail = new Thumbnail($asset, $configuration);
+            $thumbnail = new Thumbnail($asset, $configuration, $async);
 
             // Allow thumbnails to be persisted even if this is a "safe" HTTP request:
             $this->thumbnailRepository->add($thumbnail);
             $asset->addThumbnail($thumbnail);
+
             $this->persistenceManager->whiteListObject($thumbnail);
-            $this->persistenceManager->whiteListObject($thumbnail->getResource());
+            $this->thumbnailCache[$assetIdentifier][$configurationHash] = $thumbnail;
+        } elseif ($thumbnail->getResource() === null && $async === false) {
+            $this->refreshThumbnail($thumbnail);
         }
 
         return $thumbnail;
@@ -120,6 +139,42 @@ class ThumbnailService
             'height' => $iconSize,
             'src' => $icon
         );
+    }
+
+    /**
+     * @return array Returns preset configuration for all presets
+     */
+    public function getPresets()
+    {
+        return $this->presets;
+    }
+
+    /**
+     * @param string $preset The preset identifier
+     * @return ThumbnailConfiguration
+     * @throws ThumbnailServiceException
+     */
+    public function getThumbnailConfigurationForPreset($preset)
+    {
+        if (!isset($this->presets[$preset])) {
+            throw new ThumbnailServiceException(sprintf('Thumbnail preset configuration for "%s" not found.', $preset), 1447664950);
+        }
+        $thumbnailConfiguration = new ThumbnailConfiguration;
+        call_user_func_array(array($thumbnailConfiguration, '__construct'), $this->presets[$preset]);
+        return $thumbnailConfiguration;
+    }
+
+    /**
+     * Refreshes a thumbnail and persists the thumbnail
+     *
+     * @param Thumbnail $thumbnail
+     * @return void
+     */
+    public function refreshThumbnail(Thumbnail $thumbnail)
+    {
+        $thumbnail->refresh();
+        $this->persistenceManager->whiteListObject($thumbnail);
+        $this->thumbnailRepository->update($thumbnail);
     }
 
     /**
